@@ -5,7 +5,7 @@ import pandas as pd
 
 from datetime import datetime, timedelta
 from airflow import DAG
-from airflow.operators.python_operator import PythonOperator, BranchPythonOperator
+from airflow.operators.python_operator import PythonOperator
 from airflow.providers.postgres.operators.postgres import PostgresOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.hooks.http_hook import HttpHook
@@ -99,6 +99,7 @@ def upload_data_to_staging(filename, date, pg_table, pg_schema, ti):
 
     postgres_hook = PostgresHook(postgres_conn_id)
     engine = postgres_hook.get_sqlalchemy_engine()
+
     row_count = df.to_sql(pg_table, engine, schema=pg_schema, if_exists='append', index=False)
     print(f'{row_count} rows was inserted')
 
@@ -111,16 +112,16 @@ args = {
     'retries': 0
 }
 
-business_dt = '{{ ds }}'
-day_delta_for_sql = 0
+business_dt = '{{ macros.ds_add(ds, -1) }}'
+day_delta_for_sql = 1
 
 with DAG(
-        'sales_mart',
+        'sales_mart_daily',
+        schedule_interval='0 0 * * *',
         default_args=args,
-        description='Provide default dag for sprint3',
-        catchup=True,
-        start_date=datetime.today() - timedelta(days=7),
-        end_date=datetime.today() - timedelta(days=1),
+        description='daily_inc_for_sales_marts',
+        catchup=False,
+        start_date=datetime.today() - timedelta(days=1),
 ) as dag:
     generate_report = PythonOperator(
         task_id='generate_report',
@@ -150,20 +151,14 @@ with DAG(
                    'pg_table': 'user_order_log',
                    'pg_schema': 'staging'})
 
-    update_d_item_table = PostgresOperator(
-        task_id='update_d_item',
-        postgres_conn_id=postgres_conn_id,
-        sql="sql/mart.d_item.sql")
-
-    update_d_customer_table = PostgresOperator(
-        task_id='update_d_customer',
-        postgres_conn_id=postgres_conn_id,
-        sql="sql/mart.d_customer.sql")
-
-    update_d_city_table = PostgresOperator(
-        task_id='update_d_city',
-        postgres_conn_id=postgres_conn_id,
-        sql="sql/mart.d_city.sql")
+    dimension_task = list()
+    for i in ['d_city', 'd_item', 'd_customer']:
+        dimension_task.append(PostgresOperator(
+            task_id=f'update_{i}',
+            postgres_conn_id=postgres_conn_id,
+            sql=f'sql/mart.{i}.sql',
+            )
+        )
 
     update_f_sales = PostgresOperator(
         task_id='update_f_sales',
@@ -185,7 +180,7 @@ with DAG(
             >> get_increment
             >> delete_inc_user_order
             >> upload_user_order_inc
-            >> [update_d_item_table, update_d_city_table, update_d_customer_table]
+            >> dimension_task
             >> update_f_sales
             >> update_f_customer_retention
     )
